@@ -178,11 +178,25 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	outputPath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not process video for faststart", err)
+		return
+	}
+	defer os.Remove(outputPath)
+
+	processedFile, err := os.Open(outputPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not save process video for faststart", err)
+		return
+	}
+	defer processedFile.Close()
+
 	key := prefix + "/" + getAssetPath(mediaType)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(key),
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: aws.String(mediaType),
 	})
 	if err != nil {
@@ -252,4 +266,17 @@ func getVideoAspectRatio(filePath string) (string, error) {
 // of want. E.g. tol=0.05 means "within 5% of the target ratio".
 func withinTolerance(got, want, tol float64) bool {
 	return math.Abs(got-want) <= want*tol
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputFilePath := filePath + ".processing"
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFilePath)
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("failed to run the fast start command")
+	}
+
+	return outputFilePath, nil
 }
