@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,10 +11,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -203,8 +207,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Error uploading file to S3", err)
 		return
 	}
-
-	url := cfg.getObjectURL(key)
+	url := cfg.s3Bucket + "," + key
 	video.VideoURL = &url
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
@@ -212,7 +215,44 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	video, err = cfg.dbVideoToSignedVideo(video)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't generate presigned URL", err)
+		return
+	}
+
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+// generatePresignedURL returns a time-limited GET URL for the given S3 object,
+// so private buckets can be read without making the object public.
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	preClient := s3.NewPresignClient(s3Client)
+
+	preRequest, err := preClient.PresignGetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	}, s3.WithPresignExpires(expireTime))
+	if err != nil {
+		return "", fmt.Errorf("failed to generate presigned URL for s3://%s/%s: %w", bucket, key, err)
+	}
+	return preRequest.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	if video.VideoURL == nil {
+		return video, nil
+	}
+	splits := strings.Split(*video.VideoURL, ",")
+	bucket := splits[0]
+	key := splits[1]
+
+	preUrl, err := generatePresignedURL(cfg.s3Client, bucket, key, 15*time.Minute)
+	if err != nil {
+		return database.Video{}, err
+	}
+	video.VideoURL = &preUrl
+	return video, nil
 }
 
 func getVideoAspectRatio(filePath string) (string, error) {
